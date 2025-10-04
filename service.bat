@@ -1,9 +1,10 @@
 @echo off
-set "LOCAL_VERSION=1.8.3"
+set "LOCAL_VERSION=1.8.4"
 
 :: External commands
 if "%~1"=="status_zapret" (
     call :test_service zapret soft
+    call :tcp_enable
     exit /b
 )
 
@@ -27,7 +28,7 @@ if "%1"=="admin" (
 ) else (
     echo Requesting admin rights...
     powershell -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" admin\"' -Verb RunAs"
-    exit /b
+    exit
 )
 
 
@@ -63,6 +64,12 @@ if "%menu_choice%"=="8" goto ipset_switch
 if "%menu_choice%"=="9" goto ipset_update
 if "%menu_choice%"=="0" exit /b
 goto menu
+
+
+:: TCP ENABLE ==========================
+:tcp_enable
+netsh interface tcp show global | findstr /i "timestamps" | findstr /i "enabled" > nul || netsh interface tcp set global timestamps=enabled > nul 2>&1
+exit /b
 
 
 :: STATUS ==============================
@@ -315,6 +322,7 @@ set QUOTE="
 
 for /f "tokens=*" %%a in ('type "!selectedFile!"') do (
     set "line=%%a"
+    call set "line=%%line:^!=EXCL_MARK%%"
 
     echo !line! | findstr /i "%BIN%winws.exe" >nul
     if not errorlevel 1 (
@@ -365,9 +373,9 @@ for /f "tokens=*" %%a in ('type "!selectedFile!"') do (
 
                 if "!arg:~0,2!" EQU "--" (
                     set "mergeargs=2"
-                ) else if !mergeargs!==2 (
-                    set "mergeargs=1"
-                ) else if !mergeargs!==1 (
+                ) else if !mergeargs! GEQ 1 (
+                    if !mergeargs!==2 set "mergeargs=1"
+
                     for %%x in (!args_with_value!) do (
                         if /i "%%x"=="!arg!" (
                             set "mergeargs=3"
@@ -384,13 +392,16 @@ for /f "tokens=*" %%a in ('type "!selectedFile!"') do (
 )
 
 :: Creating service with parsed args
+call :tcp_enable
+
 set ARGS=%args%
+call set "ARGS=%%ARGS:EXCL_MARK=^!%%"
 echo Final args: !ARGS!
 set SRVCNAME=zapret
 
 net stop %SRVCNAME% >nul 2>&1
 sc delete %SRVCNAME% >nul 2>&1
-sc create %SRVCNAME% binPath= "\"%BIN_PATH%winws.exe\" %ARGS%" DisplayName= "zapret" start= auto
+sc create %SRVCNAME% binPath= "\"%BIN_PATH%winws.exe\" !ARGS!" DisplayName= "zapret" start= auto
 sc description %SRVCNAME% "Zapret DPI bypass software"
 sc start %SRVCNAME%
 for %%F in ("!selectedFile!") do (
@@ -420,8 +431,8 @@ for /f "delims=" %%A in ('powershell -command "(Invoke-WebRequest -Uri \"%GITHUB
 
 :: Error handling
 if not defined GITHUB_VERSION (
-    echo Warning: failed to fetch the latest version. Check your internet connection. This warning does not affect the operation of zapret
-    pause
+    echo Warning: failed to fetch the latest version. This warning does not affect the operation of zapret
+    timeout /T 9
     if "%1"=="soft" exit 
     goto menu
 )
@@ -466,6 +477,21 @@ if !errorlevel!==0 (
     call :PrintGreen "Base Filtering Engine check passed"
 ) else (
     call :PrintRed "[X] Base Filtering Engine is not running. This service is required for zapret to work"
+)
+echo:
+
+:: TCP timestamps check
+netsh interface tcp show global | findstr /i "timestamps" | findstr /i "enabled" > nul
+if !errorlevel!==0 (
+    call :PrintGreen "TCP timestamps check passed"
+) else (
+    call :PrintYellow "[?] TCP timestamps are disabled. Enabling timestamps..."
+    netsh interface tcp set global timestamps=enabled > nul 2>&1
+    if !errorlevel!==0 (
+        call :PrintGreen "TCP timestamps successfully enabled"
+    ) else (
+        call :PrintRed "[X] Failed to enable TCP timestamps"
+    )
 )
 echo:
 
@@ -540,17 +566,17 @@ if !errorlevel!==0 (
 echo:
 
 :: DNS
-set "dnsfound=0"
-for /f "delims=" %%a in ('powershell -Command "Get-WmiObject -Class Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true} | ForEach-Object {$_.DNSServerSearchOrder} | Where-Object {$_ -match '^192\.168\.'} | Measure-Object | Select-Object -ExpandProperty Count"') do (
+set "dohfound=0"
+for /f "delims=" %%a in ('powershell -Command "Get-ChildItem -Recurse -Path 'HKLM:System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' | Get-ItemProperty | Where-Object { $_.DohFlags -gt 0 } | Measure-Object | Select-Object -ExpandProperty Count"') do (
     if %%a gtr 0 (
-        set "dnsfound=1"
+        set "dohfound=1"
     )
 )
-if !dnsfound!==1 (
-    call :PrintYellow "[?] DNS servers are probably not specified."
-    call :PrintYellow "Provider's DNS servers are probably automatically used, which may affect zapret. It is recommended to install well-known DNS servers and setup DoH"
+if !dohfound!==0 (
+    call :PrintYellow "[?] Make sure you have configured secure DNS in a browser with some non-default DNS service provider,"
+    call :PrintYellow "If you use Windows 11 you can configure encrypted DNS in the Settings to hide this warning"
 ) else (
-    call :PrintGreen "DNS check passed"
+    call :PrintGreen "Secure DNS check passed"
 )
 echo:
 
@@ -558,7 +584,7 @@ echo:
 tasklist /FI "IMAGENAME eq winws.exe" | find /I "winws.exe" > nul
 set "winws_running=!errorlevel!"
 
-sc query WinDidvert | findstr /I "RUNNING STOP_PENDING" > nul
+sc query "WinDivert" | findstr /I "RUNNING STOP_PENDING" > nul
 set "windivert_running=!errorlevel!"
 
 if !winws_running! neq 0 if !windivert_running!==0 (
@@ -592,6 +618,7 @@ if !winws_running! neq 0 if !windivert_running!==0 (
         ) else (
             call :PrintYellow "[?] Attempting to delete WinDivert again..."
 
+            net stop "WinDivert" >nul 2>&1
             sc delete "WinDivert" >nul 2>&1
             sc query "WinDivert" >nul 2>&1
             if !errorlevel! neq 0 (
@@ -609,6 +636,8 @@ if !winws_running! neq 0 if !windivert_running!==0 (
 
 :: Conflicting bypasses
 set "conflicting_services=GoodbyeDPI discordfix_zapret winws1 winws2"
+set "found_any_conflict=0"
+set "found_conflicts="
 
 for %%s in (!conflicting_services!) do (
     sc query "%%s" >nul 2>&1
@@ -729,7 +758,7 @@ goto menu
 :ipset_switch_status
 chcp 437 > nul
 
-findstr /R "^0\.0\.0\.0/32$" "%~dp0lists\ipset-all.txt" >nul
+findstr /R "^203\.0\.113\.113/32$" "%~dp0lists\ipset-all.txt" >nul
 if !errorlevel!==0 (
     set "IPsetStatus=empty"
 ) else (
@@ -745,7 +774,7 @@ cls
 set "listFile=%~dp0lists\ipset-all.txt"
 set "backupFile=%listFile%.backup"
 
-findstr /R "^0\.0\.0\.0/32$" "%listFile%" >nul
+findstr /R "^203\.0\.113\.113/32$" "%listFile%" >nul
 if !errorlevel!==0 (
     echo Enabling ipset based bypass...
 
@@ -767,7 +796,7 @@ if !errorlevel!==0 (
     )
 
     >"%listFile%" (
-        echo 0.0.0.0/32
+        echo 203.0.113.113/32
     )
 )
 
