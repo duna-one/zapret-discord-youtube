@@ -40,26 +40,28 @@ call :ipset_switch_status
 call :game_switch_status
 
 set "menu_choice=null"
-echo =========  v!LOCAL_VERSION!  =========
-echo 1. Install Service
-echo 2. Remove Services
-echo 3. Check Status
-echo 4. Run Diagnostics
-echo 5. Check Updates
-echo 6. Switch Game Filter (%GameFilterStatus%)
-echo 7. Switch ipset (%IPsetStatus%)
-echo 8. Update ipset list
+echo =======================
+echo 1. Auto Install Service
+echo 2. Install Service
+echo 3. Remove Services
+echo 4. Check Status
+echo 5. Run Diagnostics
+echo 6. Check Updates
+echo 7. Switch Game Filter (%GameFilterStatus%)
+echo 8. Switch ipset (%IPsetStatus%)
+echo 9. Update ipset list
 echo 0. Exit
-set /p menu_choice=Enter choice (0-8): 
+set /p menu_choice=Enter choice (0-9): 
 
-if "%menu_choice%"=="1" goto service_install
-if "%menu_choice%"=="2" goto service_remove
-if "%menu_choice%"=="3" goto service_status
-if "%menu_choice%"=="4" goto service_diagnostics
-if "%menu_choice%"=="5" goto service_check_updates
-if "%menu_choice%"=="6" goto game_switch
-if "%menu_choice%"=="7" goto ipset_switch
-if "%menu_choice%"=="8" goto ipset_update
+if "%menu_choice%"=="1" goto service_install_wizard
+if "%menu_choice%"=="2" goto service_install_menu
+if "%menu_choice%"=="3" goto service_remove
+if "%menu_choice%"=="4" goto service_status
+if "%menu_choice%"=="5" goto service_diagnostics
+if "%menu_choice%"=="6" goto service_check_updates
+if "%menu_choice%"=="7" goto game_switch
+if "%menu_choice%"=="8" goto ipset_switch
+if "%menu_choice%"=="9" goto ipset_update
 if "%menu_choice%"=="0" exit /b
 goto menu
 
@@ -120,41 +122,148 @@ exit /b
 
 :: REMOVE ==============================
 :service_remove
+:: %1 - exitToMainMenuOnEnd (true/false, default: true)
+setlocal EnableDelayedExpansion
+set "exitToMainMenuOnEnd=%~1"
+if "!exitToMainMenuOnEnd!"=="" set "exitToMainMenuOnEnd=true"
+
 cls
 chcp 65001 > nul
 
 set SRVCNAME=zapret
 sc query "!SRVCNAME!" >nul 2>&1
 if !errorlevel!==0 (
-    net stop %SRVCNAME%
-    sc delete %SRVCNAME%
+    echo Stopping service "%SRVCNAME%"...
+    net stop %SRVCNAME% >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo Warning: Failed to stop service "%SRVCNAME%"
+    )
+    
+    echo Deleting service "%SRVCNAME%"...
+    sc delete %SRVCNAME% >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo Warning: Failed to delete service "%SRVCNAME%"
+    ) else (
+        echo Service "%SRVCNAME%" successfully removed
+    )
 ) else (
     echo Service "%SRVCNAME%" is not installed.
 )
 
 tasklist /FI "IMAGENAME eq winws.exe" | find /I "winws.exe" > nul
 if !errorlevel!==0 (
-    taskkill /IM winws.exe /F > nul
+    taskkill /IM winws.exe /F > nul 2>&1
+    if !errorlevel! neq 0 (
+        echo Warning: Failed to terminate winws.exe process
+    )
 )
 
 sc query "WinDivert" >nul 2>&1
 if !errorlevel!==0 (
-    net stop "WinDivert"
+    echo Stopping WinDivert service...
+    net stop "WinDivert" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo Warning: Failed to stop WinDivert service
+    )
 
     sc query "WinDivert" >nul 2>&1
     if !errorlevel!==0 (
-        sc delete "WinDivert"
+        echo Deleting WinDivert service...
+        sc delete "WinDivert" >nul 2>&1
+        if !errorlevel! neq 0 (
+            echo Warning: Failed to delete WinDivert service
+        ) else (
+            echo WinDivert service successfully removed
+        )
     )
 )
-net stop "WinDivert14" >nul 2>&1
-sc delete "WinDivert14" >nul 2>&1
 
+sc query "WinDivert14" >nul 2>&1
+if !errorlevel!==0 (
+    echo Stopping WinDivert14 service...
+    net stop "WinDivert14" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo Warning: Failed to stop WinDivert14 service
+    )
+    
+    echo Deleting WinDivert14 service...
+    sc delete "WinDivert14" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo Warning: Failed to delete WinDivert14 service
+    ) else (
+        echo WinDivert14 service successfully removed
+    )
+)
+
+if /i "!exitToMainMenuOnEnd!"=="true" (
+    pause
+    endlocal
+    goto menu
+) else (
+    endlocal
+    exit /b
+)
+
+:service_install_wizard
+cls
+chcp 65001 > nul
+
+:: Clean up existing services before starting installation
+echo Cleaning up existing services...
+call :service_remove "false"
+
+:: Main
+cd /d "%~dp0"
+set "BIN_PATH=%~dp0bin\"
+set "LISTS_PATH=%~dp0lists\"
+
+:: Collect .bat files in current folder, except files that start with "service"
+setlocal EnableDelayedExpansion
+set "count=0"
+for %%f in (*.bat) do (
+    set "filename=%%~nxf"
+    if /i not "!filename:~0,7!"=="service" (
+        set /a count+=1
+        set "file!count!=%%f"
+    )
+)
+
+if !count! EQU 0 (
+    echo No available .bat files to install as service.
+    pause
+    goto menu
+)
+
+set "installed=0"
+for /L %%i in (1,1,!count!) do (
+    cls
+    set "selectedFile=!file%%i!"
+    echo Installing service from !selectedFile!...
+    call :service_install "!selectedFile!" "%%i" "false"
+    set /a installed+=1
+
+    echo.
+    set "answer="
+    set /p "answer=Are Discord and YouTube working? (y/N) (default: N): "
+    if /i "!answer!"=="y" (
+        echo Services are working. Returning to main menu.
+        pause
+        endlocal
+        goto menu
+    ) else (
+        echo Removing service for !selectedFile!...
+        call :service_remove "false"
+    )
+)
+
+echo Tried all available services, but Discord and YouTube are not working.
 pause
+endlocal
 goto menu
 
 
-:: INSTALL =============================
-:service_install
+:: INSTALL MENU =============================
+:service_install_menu
 cls
 chcp 65001 > nul
 
@@ -186,6 +295,21 @@ if not defined selectedFile (
     pause
     goto menu
 )
+
+call :service_install "!selectedFile!" "!choice!"
+goto menu
+
+:: INSTALL SERVICE =============================
+:service_install
+:: %1 - selectedFile, %2 - choice index, %3 - waitForClick (true/false, default: true)
+setlocal EnableDelayedExpansion
+
+set "selectedFile=%~1"
+set "choice=%~2"
+set "waitForClick=%~3"
+if "!waitForClick!"=="" set "waitForClick=true"
+set "BIN_PATH=%~dp0bin\"
+set "LISTS_PATH=%~dp0lists\"
 
 :: Args that should be followed by value
 set "args_with_value=sni host altorder"
@@ -280,13 +404,16 @@ sc delete %SRVCNAME% >nul 2>&1
 sc create %SRVCNAME% binPath= "\"%BIN_PATH%winws.exe\" !ARGS!" DisplayName= "zapret" start= auto
 sc description %SRVCNAME% "Zapret DPI bypass software"
 sc start %SRVCNAME%
-for %%F in ("!file%choice%!") do (
+for %%F in ("!selectedFile!") do (
     set "filename=%%~nF"
 )
 reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d "!filename!" /f
 
-pause
-goto menu
+if /i "!waitForClick!"=="true" (
+    pause
+)
+endlocal
+goto :eof
 
 
 :: CHECK UPDATES =======================
